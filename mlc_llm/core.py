@@ -577,6 +577,40 @@ def build_model_from_args(args: argparse.Namespace):
                 dump_mlc_chat_config(args, top_p=0.6, temperature=1.2, repetition_penalty=0.996)
             else:
                 dump_mlc_chat_config(args)
+        # transform_dequantize is permitted to change the input
+        # arguments of the end-to-end model, such that the function
+        # now accepts transformed arguments.
+        mod = param_manager.transform_dequantize()(mod)
+        params = utils.convert_weights(
+            mlc_llm.relax_model.param_manager.create_quantize_func(param_manager),
+            param_manager,
+            params,
+            args,
+        )
+
+        # mod_transform_before_build is not permitted to change the
+        # input arguments.
+        mod = mod_transform_before_build(mod, args, config)
+
+        # LiftTransformParams is not permitted to change the
+        # input arguments, only to break up a single function call
+        # `func(activations,weights)` into a series of two function
+        # calls `func(activations, preprocess(weights))`.
+        mod = relax.transform.LiftTransformParams()(mod)
+        mod_transform, mod = utils.split_transform_deploy_mod(mod)
+        mod = relax.transform.BundleModelParams()(mod)
+
+        utils.save_lifted_params(mod_transform, param_manager, params, args)
+
+        if args.model_category != "minigpt":
+            utils.copy_tokenizer(args)
+        if args.model_category == "rwkv":
+            # TODO: refactor config into model definition
+            dump_mlc_chat_config(args, top_p=0.6, temperature=1.2, repetition_penalty=0.996)
+        else:
+            dump_mlc_chat_config(args)
+
+        mod["decode"] = tvm.relax.utils.copy_with_new_vars(mod["prefill"].bind_symbolic_vars({"seq_len": 1}).with_attr("global_symbol", "decode"))
 
         if args.convert_weight_only:
             exit(0)
